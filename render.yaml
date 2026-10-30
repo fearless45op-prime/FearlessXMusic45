@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: VibeFearless
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python webapp.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
