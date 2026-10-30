@@ -32,7 +32,7 @@ logging.getLogger("pyrogram.connection.connection").setLevel(logging.WARNING)
 # --- CONFIGURATION ---
 API_ID = 35450953
 API_HASH = "763f72b8b828a1907a9291ef02a25dfb"
-BOT_TOKEN = "8030013116:AAE_RU3RQznhSBgH2-NrFQvyypCAN3OlGRs"
+BOT_TOKEN = "8030013116:AAH7FgxeMiGH4YpIpjpRU-KQ6PEUWSFwxyY"
 print(f"DEBUG: Script starting from {os.path.abspath(__file__)}")
 
 # Monkey-patch InlineKeyboardButton to support 'style' property (Bot API 9.4+)
