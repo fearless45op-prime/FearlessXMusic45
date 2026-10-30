@@ -1,5 +1,6 @@
 import os
 import aiohttp
+from aiohttp import web
 import asyncio
 import time
 import glob
@@ -23,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 BOT_START_TIME = time.time()
 download_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="DLWorker")
+_health_runner = None
 
 # --- LOGGING ---
 logging.basicConfig(level=logging.INFO)
@@ -32,7 +34,7 @@ logging.getLogger("pyrogram.connection.connection").setLevel(logging.WARNING)
 # --- CONFIGURATION ---
 API_ID = 35450953
 API_HASH = "763f72b8b828a1907a9291ef02a25dfb"
-BOT_TOKEN = "8030013116:AAH7FgxeMiGH4YpIpjpRU-KQ6PEUWSFwxyY"
+BOT_TOKEN = "8030013116:AAE_RU3RQznhSBgH2-NrFQvyypCAN3OlGRs"
 print(f"DEBUG: Script starting from {os.path.abspath(__file__)}")
 
 # Monkey-patch InlineKeyboardButton to support 'style' property (Bot API 9.4+)
@@ -183,93 +185,219 @@ async def safe_delete_file(file_path):
 
 
 # --- UTILS ---
-def get_ytdl_opts(file_path, video=False, client="web_embedded", is_youtube=True, use_cookies=True):
+def get_ytdl_opts(file_path, video=False, client=None, is_youtube=True, use_cookies=True):
+    """
+    Build yt-dlp options.
+
+    client=None means yt-dlp's own default YouTube client selection. This is
+    intentionally the first attempt; explicit player clients are fallbacks only.
+    """
     opts = {
         "quiet": True,
+        "no_warnings": False,
         "noprogress": True,
         "outtmpl": f"{file_path}.%(ext)s",
         "geo_bypass": True,
         "nocheckcertificate": True,
         "noplaylist": True,
         "playlist_items": "1",
-        "concurrent_fragment_downloads": 5,
-        "js_runtimes": {"node": {}},
+        "concurrent_fragment_downloads": 4,
+        "retries": 2,
+        "extractor_retries": 2,
+        "fragment_retries": 2,
+        "file_access_retries": 2,
+        "socket_timeout": 20,
+        "sleep_interval_requests": 1,
+        "overwrites": True,
     }
 
     if is_youtube:
         active_cookie = find_cookies_file() if use_cookies else None
-        if active_cookie and os.path.exists(active_cookie):
+        if active_cookie and os.path.isfile(active_cookie) and os.path.getsize(active_cookie) > 0:
             opts["cookiefile"] = active_cookie
-            logging.info(f"DEBUG: Using YouTube cookies from {active_cookie}")
+            logging.info("DEBUG: YouTube cookies enabled from configured cookie file")
         else:
-            logging.warning("DEBUG: No cookies file found for YouTube download!")
-            
-        client_list = ["web_embedded", "web"] if not client or client == "web" else [client, "web_embedded", "web"]
-        opts["extractor_args"] = {
-            "youtube": {
-                "player_client": client_list
+            logging.warning("DEBUG: No non-empty YouTube cookies file found")
+
+        # Do not set extractor_args for the first attempt. yt-dlp then uses
+        # its current built-in default client strategy.
+        if client and client != "default":
+            opts["extractor_args"] = {
+                "youtube": {"player_client": [client]}
             }
-        }
-    
-    if video: 
+
+    if video:
         opts["format"] = "bestvideo[height<=480]+bestaudio/best[height<=480]/best"
         opts["merge_output_format"] = "mp4"
-    else: 
+    else:
         opts["format"] = "bestaudio/best"
+
     return opts
 
-def extract_video_id(url):
-    pattern = r'(?:v=|\/|youtu\.be\/)([0-9A-Za-z_-]{11}).*'
-    match = re.search(pattern, url)
-    return match.group(1) if match else None
+
+def _youtube_search_url(query):
+    """Resolve a ytsearch query to a canonical video URL without downloading."""
+    search_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "extract_flat": "in_playlist",
+        "socket_timeout": 15,
+    }
+    with YoutubeDL(search_opts) as ytdl:
+        info = ytdl.extract_info(f"ytsearch1:{query}", download=False)
+    entries = (info or {}).get("entries") or []
+    if not entries:
+        return None
+    entry = entries[0] or {}
+    return entry.get("webpage_url") or (
+        f"https://www.youtube.com/watch?v={entry['id']}" if entry.get("id") else None
+    )
+
 
 async def search_and_download(query, video=False):
     cache_key = f"{query}_{video}"
-    if cache_key in DOWNLOAD_CACHE and os.path.exists(DOWNLOAD_CACHE[cache_key][0]):
-        logging.info(f"DEBUG: Found {query} in cache")
-        return DOWNLOAD_CACHE[cache_key]
+    cached = DOWNLOAD_CACHE.get(cache_key)
+    if cached and len(cached) >= 4 and cached[0] and os.path.isfile(cached[0]):
+        logging.info("DEBUG: Found %s in download cache", query)
+        return cached
 
-    loop = asyncio.get_event_loop()
-    file_id = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
-    file_path = os.path.join(DOWNLOAD_DIR, file_id)
+    loop = asyncio.get_running_loop()
+    is_url = query.lower().startswith(("http://", "https://"))
+    is_youtube = any(host in query.lower() for host in ("youtube.com", "youtu.be", "music.youtube.com"))
 
-    is_url = any(x in query.lower() for x in ["http://", "https://"])
-    
-    targets = []
+    # Required order:
+    # 1) yt-dlp's default strategy
+    # 2) direct YouTube URL (for search queries, resolve it after default fails)
+    # 3) explicit YouTube player clients
+    # 4) non-YouTube fallback providers (SoundCloud search)
+    youtube_targets = []
+    soundcloud_targets = []
+
     if is_url:
-        is_yt = any(x in query.lower() for x in ["youtube.com", "youtu.be"])
-        targets.append((query, is_yt, "web_embedded"))
+        if is_youtube:
+            youtube_targets.append(query)
+        else:
+            soundcloud_targets.append((query, False, "default"))
     else:
-        # Always prioritize authentic YouTube official releases first
-        targets.append((f"ytsearch1:{query}", True, "web_embedded"))
-        targets.append((f"scsearch1:{query}", False, "default"))
+        youtube_targets.append(f"ytsearch1:{query}")
+        soundcloud_targets.append((f"scsearch1:{query}", False, "default"))
 
-    for target_query, is_yt, cl in targets:
-        try:
-            logging.info(f"DEBUG: Attempting fast download target={target_query}, client={cl}, is_yt={is_yt}, video={video}")
-            opts = get_ytdl_opts(file_path, video, cl, is_yt, use_cookies=True)
+    attempt_number = 0
+
+    async def run_attempt(target, yt, client_name):
+        nonlocal attempt_number
+        attempt_number += 1
+        attempt_path = os.path.join(
+            DOWNLOAD_DIR, f"{int(time.time())}_{uuid.uuid4().hex[:8]}_{attempt_number}"
+        )
+        opts = get_ytdl_opts(
+            attempt_path,
+            video=video,
+            client=client_name,
+            is_youtube=yt,
+            use_cookies=yt,
+        )
+        logging.info(
+            "DEBUG: yt-dlp attempt=%s target=%s client=%s video=%s",
+            attempt_number, target, client_name or "yt-dlp-default", video,
+        )
+
+        def _extract():
             with YoutubeDL(opts) as ytdl:
-                info = await asyncio.wait_for(loop.run_in_executor(download_executor, lambda: ytdl.extract_info(target_query, download=True)), timeout=35)
-                entry = info['entries'][0] if ('entries' in info and info['entries']) else info
-                
-                downloaded = glob.glob(f"{file_path}.*")
-                if downloaded:
-                    thumb = entry.get('thumbnail')
-                    if not thumb and is_yt:
-                        vid_id = entry.get('id')
-                        if vid_id: thumb = f"https://img.youtube.com/vi/{vid_id}/hqdefault.jpg"
-                    
-                    title = entry.get('title', query)
-                    duration = int(entry.get('duration', 0))
-                    logging.info(f"DEBUG: Fast download complete: {title} ({duration}s) -> {downloaded[0]}")
-                    DOWNLOAD_CACHE[cache_key] = (downloaded[0], title, duration, thumb)
-                    save_json(CACHE_FILE, DOWNLOAD_CACHE)
-                    return downloaded[0], title, duration, thumb
-        except Exception as e:
-            err_msg = str(e).lower()
-            logging.error(f"DEBUG: Error downloading {target_query} with {cl}: {err_msg}")
-            continue
-        
+                return ytdl.extract_info(target, download=True)
+
+        try:
+            info = await asyncio.wait_for(
+                loop.run_in_executor(download_executor, _extract),
+                timeout=55,
+            )
+            entry = info["entries"][0] if info and info.get("entries") else (info or {})
+            downloaded = [
+                fp for fp in glob.glob(f"{attempt_path}.*")
+                if os.path.isfile(fp) and not fp.endswith((".part", ".ytdl"))
+            ]
+            if not downloaded:
+                logging.warning("DEBUG: yt-dlp returned metadata but produced no output file")
+                return None
+
+            downloaded.sort(key=lambda fp: os.path.getsize(fp), reverse=True)
+            final_path = downloaded[0]
+            title = entry.get("title") or query
+            duration = int(entry.get("duration") or 0)
+            thumb = entry.get("thumbnail")
+            if not thumb and yt and entry.get("id"):
+                thumb = f"https://img.youtube.com/vi/{entry['id']}/hqdefault.jpg"
+
+            logging.info(
+                "DEBUG: Download successful: %s (%ss) -> %s",
+                title, duration, final_path,
+            )
+            return final_path, title, duration, thumb
+        except asyncio.TimeoutError:
+            logging.error("DEBUG: Download timed out for %s (%s)", target, client_name)
+        except Exception as exc:
+            logging.warning(
+                "DEBUG: Download failed target=%s client=%s: %s",
+                target, client_name or "yt-dlp-default", exc,
+            )
+        finally:
+            # Remove only this attempt's incomplete output; successful file is
+            # retained because it no longer has a .part/.ytdl suffix.
+            for fp in glob.glob(f"{attempt_path}.*"):
+                if fp.endswith((".part", ".ytdl")):
+                    try:
+                        os.remove(fp)
+                    except OSError:
+                        pass
+        return None
+
+    # First attempt: yt-dlp default client behavior, with no forced player_client.
+    for target in youtube_targets:
+        result = await run_attempt(target, True, None)
+        if result:
+            DOWNLOAD_CACHE[cache_key] = result
+            save_json(CACHE_FILE, DOWNLOAD_CACHE)
+            return result
+
+    # If the original request was a text search, resolve the result and retry
+    # using its direct canonical YouTube URL before trying alternate clients.
+    direct_url = query if (is_url and is_youtube) else None
+    if not is_url and youtube_targets:
+        try:
+            direct_url = await asyncio.wait_for(
+                loop.run_in_executor(download_executor, _youtube_search_url, query),
+                timeout=20,
+            )
+        except Exception as exc:
+            logging.warning("DEBUG: Could not resolve direct YouTube URL for %r: %s", query, exc)
+
+    if direct_url:
+        result = await run_attempt(direct_url, True, None)
+        if result:
+            DOWNLOAD_CACHE[cache_key] = result
+            save_json(CACHE_FILE, DOWNLOAD_CACHE)
+            return result
+
+        # Alternate clients are strictly fallbacks, after default and direct URL.
+        for client_name in (
+            "android", "ios", "tv", "web_embedded", "mweb", "web_safari", "web"
+        ):
+            result = await run_attempt(direct_url, True, client_name)
+            if result:
+                DOWNLOAD_CACHE[cache_key] = result
+                save_json(CACHE_FILE, DOWNLOAD_CACHE)
+                return result
+
+    # SoundCloud and other providers are attempted only after YouTube paths.
+    for target, yt, client_name in soundcloud_targets:
+        result = await run_attempt(target, yt, client_name)
+        if result:
+            DOWNLOAD_CACHE[cache_key] = result
+            save_json(CACHE_FILE, DOWNLOAD_CACHE)
+            return result
+
+    logging.error("DEBUG: All download providers failed for query=%r", query)
     return None, None, None, None
 
 async def ensure_user_in_chat(chat_id, user_client, bot_client):
@@ -2959,6 +3087,23 @@ async def start_single_clone(token, d):
         logging.error(f"Clone {token[:8]} failed: {e}")
 
 async def main():
+    # Render Web Services require an HTTP listener. This lightweight endpoint
+    # is independent of Telegram and is used only for health checks.
+    global _health_runner
+    if _health_runner is None:
+        async def health_check(request):
+            return web.json_response({"status": "ok", "service": "FearlessXMusic45"})
+
+        health_app = web.Application()
+        health_app.router.add_get("/", health_check)
+        health_app.router.add_get("/health", health_check)
+        _health_runner = web.AppRunner(health_app)
+        await _health_runner.setup()
+        port = int(os.environ.get("PORT", "10000"))
+        health_site = web.TCPSite(_health_runner, "0.0.0.0", port)
+        await health_site.start()
+        logging.info("HTTP health server listening on 0.0.0.0:%s", port)
+
     await bot.start()
     bot.me = await bot.get_me()
     
