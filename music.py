@@ -87,8 +87,7 @@ def get_session_string():
                 elif isinstance(d, str) and d.strip():
                     return d.strip()
         except: pass
-    return "BQIc8EkAKuhBvNv1YqqOMcJP673pcLLjOcGbEsaxGZBXzSR6WjaxDd_uY6ENyUOO8-MFvIzl5HFgvrwOFyPEPVFd0MIef6B9qrErltUjh1TX9keJ85TOj5vBO7i2uGqgfeQskSCKYEJkH_BtDzfLnyeDz8kGrRiwmPflKaVk10zWFdz3Jya_4_33J9fF25FQ0DNkX52WUtu0yAbaI2rCt8OtJXpNAFm2aFuhBsO0QOD-_9cgxad1AY6tklv2FJL4dxJNqz-yvk_hCDkfxdxYIEf76cmq3ienRQRxJpgyIpkQmRz0SPh1ij9oD41XsusTZfG_t3wgN98G8oBcBaI3MdzdPF3JnAAAAAH9cc3dAA"
-
+    return "BQIc8EkABuoC4yuEVEt1-IADhpEUi6wSIU6aX1RDl_toAOMwgbgdRYhrx-bEMh4mwZ3QJtOvYSZDxvbfQ5GouRG-ANGsoVHQV3dNept-FA_Raizd3-WjUgLWKMoqsa8Yg7pOsLAigqS7Kuphkxwc_EKYY1NtYtVW3xHFsyhNue_StYxXg3ScRGhqeuaKO9lkCU9M5qvgoR1Dm5UrKUSYq_E3fuwMXy62ODCZpHYr8WYbS0sWJXNnvNup5IksMAyvkUpc_89FCICPQVauEoZhARmzVr37vtd819NMqO328SnhS9VP0tAupycyb7lwOboAttrW7BkjPad7HZFTXq2lM1Xk-xVERQAAAAH9cc3dAA"
 SESSION_STRING = get_session_string()
 PHONE_NUMBER = "+918435085793"
 
