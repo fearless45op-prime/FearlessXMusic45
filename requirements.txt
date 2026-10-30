@@ -1,0 +1,11 @@
+pyrogrammod==2.4.1
+TgCrypto==1.2.5
+py-tgcalls==2.2.11
+yt-dlp[default]==2026.10.26
+yt-dlp-ejs==0.8.0
+aiohttp==3.14.3
+psutil==7.2.2
+py-yt-search==0.8.0
+curl-cffi>=0.16.3
+yukiytapi==1.0.0
+yukiapi==1.0.0
